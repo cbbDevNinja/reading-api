@@ -7,9 +7,11 @@ const app = express();
 const PORT = 3000;
 const JWT_SECRET = 'your-secret-key-change-this-later';
 
-const pool = new Pool({
-  database: 'reading_list'
-});
+const pool = new Pool(
+  process.env.DATABASE_URL
+    ? { connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } }
+    : { database: 'reading_list' }
+);
 
 app.use(express.json());
 
