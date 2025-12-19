@@ -4,7 +4,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const JWT_SECRET = 'your-secret-key-change-this-later';
 
 const pool = new Pool(
