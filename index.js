@@ -178,6 +178,133 @@ app.delete('/books/:id', authenticate, async (req, res) => {
   }
 });
 
+// GET all categories
+app.get('/categories', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM categories WHERE user_id = $1 ORDER BY name',
+      [req.userId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get categories error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST new category
+app.post('/categories', authenticate, async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name) {
+      return res.status(400).json({ error: 'Name required' });
+    }
+    const result = await pool.query(
+      'INSERT INTO categories (name, user_id) VALUES ($1, $2) RETURNING *',
+      [name, req.userId]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Create category error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE category
+app.delete('/categories/:id', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM categories WHERE id = $1 AND user_id = $2 RETURNING *',
+      [req.params.id, req.userId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+    res.status(204).send();
+  } catch (err) {
+    console.error('Delete category error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Add category to book
+app.post('/books/:id/categories', authenticate, async (req, res) => {
+  try {
+    const { categoryId } = req.body;
+    if (!categoryId) {
+      return res.status(400).json({ error: 'categoryId required' });
+    }
+    
+    // Verify book belongs to user
+    const book = await pool.query(
+      'SELECT * FROM books WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.userId]
+    );
+    if (book.rows.length === 0) {
+      return res.status(404).json({ error: 'Book not found' });
+    }
+    
+    // Verify category belongs to user
+    const category = await pool.query(
+      'SELECT * FROM categories WHERE id = $1 AND user_id = $2',
+      [categoryId, req.userId]
+    );
+    if (category.rows.length === 0) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+    
+    await pool.query(
+      'INSERT INTO book_categories (book_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [req.params.id, categoryId]
+    );
+    
+    res.status(201).json({ message: 'Category added to book' });
+  } catch (err) {
+    console.error('Add category to book error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Remove category from book
+app.delete('/books/:id/categories/:categoryId', authenticate, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM book_categories WHERE book_id = $1 AND category_id = $2',
+      [req.params.id, req.params.categoryId]
+    );
+    res.status(204).send();
+  } catch (err) {
+    console.error('Remove category from book error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET books with their categories
+app.get('/books-with-categories', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        b.*,
+        COALESCE(
+          json_agg(
+            json_build_object('id', c.id, 'name', c.name)
+          ) FILTER (WHERE c.id IS NOT NULL),
+          '[]'
+        ) as categories
+      FROM books b
+      LEFT JOIN book_categories bc ON b.id = bc.book_id
+      LEFT JOIN categories c ON bc.category_id = c.id
+      WHERE b.user_id = $1
+      GROUP BY b.id
+      ORDER BY b.id
+    `, [req.userId]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get books with categories error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
