@@ -117,13 +117,35 @@ app.get('/books/search', authenticate, async (req, res) => {
 });
 
 // GET all books
+// GET all books (with pagination)
 app.get('/books', authenticate, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM books WHERE user_id = $1 ORDER BY id',
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+    
+    // Get total count
+    const countResult = await pool.query(
+      'SELECT COUNT(*) FROM books WHERE user_id = $1',
       [req.userId]
     );
-    res.json(result.rows);
+    const total = parseInt(countResult.rows[0].count);
+    
+    // Get paginated books
+    const result = await pool.query(
+      'SELECT * FROM books WHERE user_id = $1 ORDER BY id LIMIT $2 OFFSET $3',
+      [req.userId, limit, offset]
+    );
+    
+    res.json({
+      books: result.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (err) {
     console.error('Get books error:', err);
     res.status(500).json({ error: 'Server error' });
