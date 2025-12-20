@@ -94,6 +94,28 @@ app.post('/login', async (req, res) => {
   }
 });
 
+// Search books
+app.get('/books/search', authenticate, async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q) {
+      return res.status(400).json({ error: 'Search query required' });
+    }
+    
+    const result = await pool.query(`
+      SELECT * FROM books 
+      WHERE user_id = $1 
+        AND (title ILIKE $2 OR author ILIKE $2)
+      ORDER BY title
+    `, [req.userId, `%${q}%`]);
+    
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Search error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET all books
 app.get('/books', authenticate, async (req, res) => {
   try {
