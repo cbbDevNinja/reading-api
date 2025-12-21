@@ -23,6 +23,45 @@ const redisClient = redis.createClient({
 redisClient.on('error', (err) => console.error('Redis error:', err));
 redisClient.connect().then(() => console.log('Redis connected'));
 
+const { Queue, Worker } = require('bullmq');
+
+const redisConnection = {
+  host: process.env.REDIS_HOST || 'localhost',
+  port: process.env.REDIS_PORT || 6379
+};
+
+// Create a queue for email jobs
+const emailQueue = new Queue('email', { connection: redisConnection });
+
+// Create a worker to process email jobs
+const emailWorker = new Worker('email', async (job) => {
+  console.log(`Processing job ${job.id}: ${job.name}`);
+  
+  // Simulate occasional failure
+  if (Math.random() < 0.3) {
+    throw new Error('Email service temporarily unavailable');
+  }
+  
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  console.log(`Email sent to ${job.data.to}`);
+  return { sent: true };
+}, { 
+  connection: redisConnection,
+  attempts: 3,
+  backoff: {
+    type: 'exponential',
+    delay: 1000
+  }
+});
+
+emailWorker.on('completed', (job, result) => {
+  console.log(`Job ${job.id} completed:`, result);
+});
+
+emailWorker.on('failed', (job, err) => {
+  console.error(`Job ${job.id} failed:`, err.message);
+});
+
 // Test database connection on startup
 pool.query('SELECT NOW()')
   .then(() => console.log('Database connected'))
@@ -74,6 +113,15 @@ app.post('/signup', async (req, res) => {
       'INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id, email',
       [email, hashedPassword]
     );
+    
+    // Queue welcome email (non-blocking)
+    await emailQueue.add('welcome', {
+      to: email,
+      subject: 'Welcome to Reading List!',
+      body: 'Thanks for signing up. Start adding books to your reading list.'
+    });
+    console.log('Welcome email queued for:', email);
+    
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Signup error:', err);
