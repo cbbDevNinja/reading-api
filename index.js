@@ -2,6 +2,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const redis = require('redis');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,12 +15,28 @@ const pool = new Pool(
     : { database: 'reading_list' }
 );
 
+// Redis connection
+const redisClient = redis.createClient({
+  url: process.env.REDIS_URL || 'redis://localhost:6379'
+});
+
+redisClient.on('error', (err) => console.error('Redis error:', err));
+redisClient.connect().then(() => console.log('Redis connected'));
+
 // Test database connection on startup
 pool.query('SELECT NOW()')
   .then(() => console.log('Database connected'))
   .catch(err => console.error('Database connection error:', err));
 
 app.use(express.json());
+
+// Helper function to invalidate user's book cache
+async function invalidateBookCache(userId) {
+  const keys = await redisClient.keys(`user:${userId}:books:*`);
+  if (keys.length > 0) {
+    await redisClient.del(keys);
+  }
+}
 
 // Health check endpoint
 app.get('/', (req, res) => {
@@ -102,12 +119,23 @@ app.get('/books/search', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Search query required' });
     }
     
+    const cacheKey = `user:${req.userId}:books:search:${q.toLowerCase()}`;
+    
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      console.log('Cache hit - search');
+      return res.json(JSON.parse(cached));
+    }
+    console.log('Cache miss - search');
+    
     const result = await pool.query(`
       SELECT * FROM books 
       WHERE user_id = $1 
         AND (title ILIKE $2 OR author ILIKE $2)
       ORDER BY title
     `, [req.userId, `%${q}%`]);
+    
+    await redisClient.setEx(cacheKey, 60, JSON.stringify(result.rows));
     
     res.json(result.rows);
   } catch (err) {
@@ -116,36 +144,40 @@ app.get('/books/search', authenticate, async (req, res) => {
   }
 });
 
-// GET all books
-// GET all books (with pagination)
+// GET all books (with pagination and caching)
 app.get('/books', authenticate, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const offset = (page - 1) * limit;
-    
-    // Get total count
+    const cacheKey = `user:${req.userId}:books:page:${page}:limit:${limit}`;
+
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      console.log('Cache hit - books');
+      return res.json(JSON.parse(cached));
+    }
+    console.log('Cache miss - books');
+
     const countResult = await pool.query(
       'SELECT COUNT(*) FROM books WHERE user_id = $1',
       [req.userId]
     );
     const total = parseInt(countResult.rows[0].count);
-    
-    // Get paginated books
+
     const result = await pool.query(
       'SELECT * FROM books WHERE user_id = $1 ORDER BY id LIMIT $2 OFFSET $3',
       [req.userId, limit, offset]
     );
-    
-    res.json({
+
+    const response = {
       books: result.rows,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit)
-      }
-    });
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) }
+    };
+
+    await redisClient.setEx(cacheKey, 60, JSON.stringify(response));
+
+    res.json(response);
   } catch (err) {
     console.error('Get books error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -155,6 +187,15 @@ app.get('/books', authenticate, async (req, res) => {
 // GET single book
 app.get('/books/:id', authenticate, async (req, res) => {
   try {
+    const cacheKey = `user:${req.userId}:books:single:${req.params.id}`;
+    
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      console.log('Cache hit - single book');
+      return res.json(JSON.parse(cached));
+    }
+    console.log('Cache miss - single book');
+    
     const result = await pool.query(
       'SELECT * FROM books WHERE id = $1 AND user_id = $2',
       [req.params.id, req.userId]
@@ -162,6 +203,9 @@ app.get('/books/:id', authenticate, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Book not found' });
     }
+    
+    await redisClient.setEx(cacheKey, 60, JSON.stringify(result.rows[0]));
+    
     res.json(result.rows[0]);
   } catch (err) {
     console.error('Get book error:', err);
@@ -180,6 +224,9 @@ app.post('/books', authenticate, async (req, res) => {
       'INSERT INTO books (title, author, user_id) VALUES ($1, $2, $3) RETURNING *',
       [title, author, req.userId]
     );
+
+    await invalidateBookCache(req.userId);
+
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Create book error:', err);
@@ -198,6 +245,9 @@ app.patch('/books/:id', authenticate, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Book not found' });
     }
+
+    await invalidateBookCache(req.userId);
+
     res.json(result.rows[0]);
   } catch (err) {
     console.error('Update book error:', err);
@@ -215,6 +265,9 @@ app.delete('/books/:id', authenticate, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Book not found' });
     }
+
+    await invalidateBookCache(req.userId);
+
     res.status(204).send();
   } catch (err) {
     console.error('Delete book error:', err);
@@ -225,10 +278,22 @@ app.delete('/books/:id', authenticate, async (req, res) => {
 // GET all categories
 app.get('/categories', authenticate, async (req, res) => {
   try {
+    const cacheKey = `user:${req.userId}:categories`;
+    
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      console.log('Cache hit - categories');
+      return res.json(JSON.parse(cached));
+    }
+    console.log('Cache miss - categories');
+    
     const result = await pool.query(
       'SELECT * FROM categories WHERE user_id = $1 ORDER BY name',
       [req.userId]
     );
+    
+    await redisClient.setEx(cacheKey, 60, JSON.stringify(result.rows));
+    
     res.json(result.rows);
   } catch (err) {
     console.error('Get categories error:', err);
@@ -247,6 +312,9 @@ app.post('/categories', authenticate, async (req, res) => {
       'INSERT INTO categories (name, user_id) VALUES ($1, $2) RETURNING *',
       [name, req.userId]
     );
+    
+    await redisClient.del(`user:${req.userId}:categories`);
+    
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Create category error:', err);
@@ -264,6 +332,10 @@ app.delete('/categories/:id', authenticate, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Category not found' });
     }
+    
+    await redisClient.del(`user:${req.userId}:categories`);
+    await invalidateBookCache(req.userId);
+    
     res.status(204).send();
   } catch (err) {
     console.error('Delete category error:', err);
@@ -279,7 +351,6 @@ app.post('/books/:id/categories', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'categoryId required' });
     }
     
-    // Verify book belongs to user
     const book = await pool.query(
       'SELECT * FROM books WHERE id = $1 AND user_id = $2',
       [req.params.id, req.userId]
@@ -288,7 +359,6 @@ app.post('/books/:id/categories', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Book not found' });
     }
     
-    // Verify category belongs to user
     const category = await pool.query(
       'SELECT * FROM categories WHERE id = $1 AND user_id = $2',
       [categoryId, req.userId]
@@ -301,6 +371,8 @@ app.post('/books/:id/categories', authenticate, async (req, res) => {
       'INSERT INTO book_categories (book_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
       [req.params.id, categoryId]
     );
+    
+    await invalidateBookCache(req.userId);
     
     res.status(201).json({ message: 'Category added to book' });
   } catch (err) {
@@ -316,6 +388,9 @@ app.delete('/books/:id/categories/:categoryId', authenticate, async (req, res) =
       'DELETE FROM book_categories WHERE book_id = $1 AND category_id = $2',
       [req.params.id, req.params.categoryId]
     );
+    
+    await invalidateBookCache(req.userId);
+    
     res.status(204).send();
   } catch (err) {
     console.error('Remove category from book error:', err);
@@ -326,6 +401,15 @@ app.delete('/books/:id/categories/:categoryId', authenticate, async (req, res) =
 // GET books with their categories
 app.get('/books-with-categories', authenticate, async (req, res) => {
   try {
+    const cacheKey = `user:${req.userId}:books:with-categories`;
+    
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      console.log('Cache hit - books with categories');
+      return res.json(JSON.parse(cached));
+    }
+    console.log('Cache miss - books with categories');
+    
     const result = await pool.query(`
       SELECT 
         b.*,
@@ -342,6 +426,9 @@ app.get('/books-with-categories', authenticate, async (req, res) => {
       GROUP BY b.id
       ORDER BY b.id
     `, [req.userId]);
+    
+    await redisClient.setEx(cacheKey, 60, JSON.stringify(result.rows));
+    
     res.json(result.rows);
   } catch (err) {
     console.error('Get books with categories error:', err);
