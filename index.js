@@ -25,11 +25,18 @@ redisClient.connect().then(() => console.log('Redis connected'));
 
 const { Queue, Worker } = require('bullmq');
 
-const redisConnection = {
-  host: process.env.REDIS_HOST || 'localhost',
-  port: process.env.REDIS_PORT || 6379
-};
-
+// Parse Redis URL for BullMQ
+let redisConnection;
+if (process.env.REDIS_URL) {
+  const redisUrl = new URL(process.env.REDIS_URL);
+  redisConnection = {
+    host: redisUrl.hostname,
+    port: parseInt(redisUrl.port),
+    password: redisUrl.password || undefined
+  };
+} else {
+  redisConnection = { host: 'localhost', port: 6379 };
+}
 // Create a queue for email jobs
 const emailQueue = new Queue('email', { connection: redisConnection });
 
