@@ -11,7 +11,10 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this-later'
 // Database connection
 const pool = new Pool(
   process.env.DATABASE_URL
-    ? { connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } }
+    ? { 
+        connectionString: process.env.DATABASE_URL, 
+        ssl: process.env.DATABASE_URL.includes('railway') ? { rejectUnauthorized: false } : false 
+      }
     : { database: 'reading_list' }
 );
 

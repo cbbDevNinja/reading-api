@@ -1,0 +1,80 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: reading_list_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Setup test database
+        run: |
+          PGPASSWORD=test psql -h localhost -U test -d reading_list_test -c "
+            CREATE TABLE users (
+              id SERIAL PRIMARY KEY,
+              email VARCHAR(255) UNIQUE NOT NULL,
+              password VARCHAR(255) NOT NULL
+            );
+            CREATE TABLE books (
+              id SERIAL PRIMARY KEY,
+              title VARCHAR(255) NOT NULL,
+              author VARCHAR(255) NOT NULL,
+              read BOOLEAN DEFAULT FALSE,
+              user_id INTEGER REFERENCES users(id)
+            );
+            CREATE TABLE categories (
+              id SERIAL PRIMARY KEY,
+              name VARCHAR(100) NOT NULL,
+              user_id INTEGER REFERENCES users(id)
+            );
+            CREATE TABLE book_categories (
+              book_id INTEGER REFERENCES books(id) ON DELETE CASCADE,
+              category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+              PRIMARY KEY (book_id, category_id)
+            );
+          "
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/reading_list_test
+          REDIS_URL: redis://localhost:6379
+        run: npm test
